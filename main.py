@@ -1,6 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
+from fastapi import FastAPI, Header, HTTPException, Body
 import os
 from dotenv import load_dotenv
 from groq import Groq
@@ -31,23 +29,6 @@ except Exception as e:
 
 # ---------------- APP ----------------
 app = FastAPI()
-
-# ---------------- MODELS ----------------
-class Message(BaseModel):
-    sender: str
-    text: str
-    timestamp: str
-
-class Metadata(BaseModel):
-    channel: Optional[str] = None
-    language: Optional[str] = None
-    locale: Optional[str] = None
-
-class HoneypotRequest(BaseModel):
-    sessionId: str
-    message: Message
-    conversationHistory: Optional[List[Message]] = []
-    metadata: Optional[Metadata] = None
 
 # ---------------- SCAM DETECTION ----------------
 def detect_scam(text: str):
@@ -85,7 +66,7 @@ def agent_reply(text: str):
 
     except Exception as e:
         print("Agent Error:", e)
-        return "Could you please explain that a bit more?"
+        return "Could you explain that more?"
 
 # ---------------- INTELLIGENCE EXTRACTION ----------------
 def extract_intelligence(text: str):
@@ -112,7 +93,7 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
         "scamDetected": scam_detected,
         "totalMessagesExchanged": total_msgs,
         "extractedIntelligence": intelligence,
-        "agentNotes": "Scammer used urgency and verification tactics"
+        "agentNotes": "Scammer used urgency tactics"
     }
 
     try:
@@ -127,22 +108,26 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
 
 # ---------------- API ENDPOINT ----------------
 @app.post("/honeypot/message")
-async def honeypot_api(request: HoneypotRequest = None, x_api_key: str = Header(None)):
+async def honeypot_api(
+    request: dict = Body(...),
+    x_api_key: str = Header(None)
+):
 
-    # API KEY CHECK
+    # ---- API KEY CHECK ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-    # ---- IMPORTANT FIX ----
-    # GUVI tester sends NO body
-    if request is None:
-        return {
-            "status": "success",
-            "scamDetected": False,
-            "reply": "Honeypot Active"
-        }
+    try:
+        session_id = request.get("sessionId", "unknown")
+        message = request.get("message", {})
+        text = message.get("text", "")
+        sender = message.get("sender", "unknown")
+        timestamp = message.get("timestamp", "now")
+        history = request.get("conversationHistory", [])
 
-    text = request.message.text
+    except Exception:
+        raise HTTPException(status_code=400, detail="Bad Request Format")
+
     scam_detected = detect_scam(text)
 
     reply = "Okay, could you explain more?"
@@ -152,17 +137,17 @@ async def honeypot_api(request: HoneypotRequest = None, x_api_key: str = Header(
         reply = agent_reply(text)
         intelligence = extract_intelligence(text)
 
-    # ---------------- SAVE TO MONGO ----------------
+    # ---- SAVE TO MONGO ----
     try:
         if sessions is not None:
             sessions.update_one(
-                {"sessionId": request.sessionId},
+                {"sessionId": session_id},
                 {
                     "$push": {
                         "messages": {
-                            "sender": request.message.sender,
+                            "sender": sender,
                             "text": text,
-                            "timestamp": request.message.timestamp
+                            "timestamp": timestamp
                         }
                     }
                 },
@@ -171,19 +156,17 @@ async def honeypot_api(request: HoneypotRequest = None, x_api_key: str = Header(
     except Exception as e:
         print("Mongo Save Error:", e)
 
-    # ---------------- CALLBACK CONDITION ----------------
-    total_msgs = len(request.conversationHistory)
-
-    if scam_detected and total_msgs >= 6:
-        send_callback(
-            request.sessionId,
-            scam_detected,
-            intelligence,
-            total_msgs
-        )
+    # ---- CALLBACK ----
+    if scam_detected and len(history) >= 6:
+        send_callback(session_id, scam_detected, intelligence, len(history))
 
     return {
         "status": "success",
         "scamDetected": scam_detected,
         "reply": reply
     }
+
+# ---------------- ROOT TEST ----------------
+@app.get("/")
+def root():
+    return {"message": "HoneyPot API Running"}
