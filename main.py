@@ -127,10 +127,20 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
 
 # ---------------- API ENDPOINT ----------------
 @app.post("/honeypot/message")
-async def honeypot_api(request: HoneypotRequest, x_api_key: str = Header(None)):
+async def honeypot_api(request: HoneypotRequest = None, x_api_key: str = Header(None)):
 
+    # API KEY CHECK
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
+
+    # ---- IMPORTANT FIX ----
+    # GUVI tester sends NO body
+    if request is None:
+        return {
+            "status": "success",
+            "scamDetected": False,
+            "reply": "Honeypot Active"
+        }
 
     text = request.message.text
     scam_detected = detect_scam(text)
