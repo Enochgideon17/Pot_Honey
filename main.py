@@ -3,22 +3,28 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os
 from dotenv import load_dotenv
-from groq import Groq
 import re
 import requests
 from pymongo import MongoClient
 import random
 
-# ---------------- ENV ----------------
+# ---------- ENV ----------
 load_dotenv()
 
-API_KEY = os.getenv("API_KEY")
+API_KEY = os.getenv("API_KEY", "supersecret123")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URL = os.getenv("MONGO_URL")
 
-client = Groq(api_key=GROQ_API_KEY)
+# ---------- OPTIONAL GROQ ----------
+groq_client = None
+if GROQ_API_KEY:
+    try:
+        from groq import Groq
+        groq_client = Groq(api_key=GROQ_API_KEY)
+    except:
+        groq_client = None
 
-# ---------------- DB SAFE CONNECT ----------------
+# ---------- MONGO SAFE CONNECT ----------
 sessions = None
 try:
     if MONGO_URL:
@@ -27,107 +33,82 @@ try:
         sessions = db["sessions"]
         print("MongoDB Connected")
 except Exception as e:
-    print("MongoDB Error:", e)
-    sessions = None
+    print("Mongo Error:", e)
 
-# ---------------- APP ----------------
+# ---------- APP ----------
 app = FastAPI()
 
-# ---------------- MODELS ----------------
-class Message(BaseModel):
-    sender: str
-    text: str
-    timestamp: str
+@app.get("/")
+def root():
+    return {"message": "Honeypot API Running"}
 
-class Metadata(BaseModel):
-    channel: Optional[str] = None
-    language: Optional[str] = None
-    locale: Optional[str] = None
+# ---------- MODELS ----------
+class Message(BaseModel):
+    sender: str = "unknown"
+    text: str = ""
+    timestamp: str = ""
 
 class HoneypotRequest(BaseModel):
-    sessionId: str
-    message: Message
+    sessionId: str = "default-session"
+    message: Optional[Message] = Message()
     conversationHistory: Optional[List[Message]] = []
-    metadata: Optional[Metadata] = None
 
-# ---------------- EMOTIONAL FALLBACKS ----------------
+# ---------- SCAM DETECTION ----------
+def detect_scam(text: str):
+    if not text:
+        return False
+
+    # AI detection if Groq available
+    if groq_client:
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[{"role": "user", "content": f"Is this a scam? YES or NO.\n{text}"}]
+            )
+            ans = response.choices[0].message.content.lower()
+            return "yes" in ans
+        except:
+            pass
+
+    # fallback keyword rule
+    keywords = ["urgent", "otp", "verify", "blocked", "bank", "account", "suspend"]
+    return any(k in text.lower() for k in keywords)
+
+# ---------- EMOTIONAL REPLIES ----------
 EMOTIONAL_REPLIES = [
-    "Oh no… what happened to my account?",
-    "That sounds serious, what should I do?",
-    "I’m really worried, is my money safe?",
-    "Can you explain what exactly went wrong?",
-    "Is this from my bank officially?",
-    "What do I need to do now?",
-    "I didn’t understand, can you tell me again?",
-    "Is there any risk to my balance?",
-    "This is scary… what should I do?",
-    "Please help, I don’t want to lose my money."
+    "Oh no, that sounds serious… what exactly happened?",
+    "I’m really worried now… can you explain more?",
+    "Wait, my account is blocked? What should I do?",
+    "This is scary… please tell me more details.",
+    "I don’t understand… why is this happening?",
+    "Is my money safe? I’m really concerned.",
+    "That sounds urgent… what do I need to do now?"
 ]
 
-# ---------------- SCAM DETECTION ----------------
-def detect_scam(text: str):
-    try:
-        prompt = f"Is this a scam message? Reply only YES or NO.\nMessage: {text}"
+def emotional_reply():
+    return random.choice(EMOTIONAL_REPLIES)
 
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        answer = response.choices[0].message.content.lower()
-        return "yes" in answer
-
-    except Exception as e:
-        print("AI Detection Error:", e)
-        keywords = ["verify", "urgent", "blocked", "upi", "account", "suspend"]
-        return any(k in text.lower() for k in keywords)
-
-# ---------------- AGENT REPLY ----------------
-def agent_reply(text: str):
-    try:
-        prompt = f"""
-        You are a worried normal human chatting with a scammer.
-        Respond emotionally but not suspicious.
-        Message: {text}
-        """
-
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        print("Agent Error:", e)
-        return random.choice(EMOTIONAL_REPLIES)
-
-# ---------------- INTELLIGENCE EXTRACTION ----------------
+# ---------- INTELLIGENCE EXTRACTION ----------
 def extract_intelligence(text: str):
     phones = re.findall(r"\+?\d{10,13}", text)
     upi = re.findall(r"\b[\w.-]+@[\w.-]+\b", text)
     links = re.findall(r"https?://\S+", text)
 
-    suspicious_words = []
-    for word in ["urgent", "verify", "blocked", "suspend", "immediately"]:
-        if word in text.lower():
-            suspicious_words.append(word)
-
     return {
         "phoneNumbers": phones,
         "upiIds": upi,
         "phishingLinks": links,
-        "suspiciousKeywords": suspicious_words
+        "suspiciousKeywords": []
     }
 
-# ---------------- CALLBACK ----------------
+# ---------- CALLBACK ----------
 def send_callback(session_id, scam_detected, intelligence, total_msgs):
     payload = {
         "sessionId": session_id,
         "scamDetected": scam_detected,
         "totalMessagesExchanged": total_msgs,
         "extractedIntelligence": intelligence,
-        "agentNotes": "Scammer used urgency and verification tactics"
+        "agentNotes": "Scammer used urgency tactics"
     }
 
     try:
@@ -136,56 +117,42 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
             json=payload,
             timeout=5
         )
-        print("Callback Sent")
-    except Exception as e:
-        print("Callback Error:", e)
+    except:
+        pass
 
-# ---------------- API ENDPOINT ----------------
+# ---------- ENDPOINT ----------
 @app.post("/honeypot/message")
-async def honeypot_api(request: HoneypotRequest, x_api_key: str = Header(None)):
+async def honeypot_api(request: Optional[HoneypotRequest] = None,
+                       x_api_key: str = Header(None)):
 
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-    text = request.message.text
+    # SAFE DEFAULTS
+    if not request:
+        request = HoneypotRequest()
+
+    text = request.message.text if request.message else ""
+
     scam_detected = detect_scam(text)
+    reply = emotional_reply() if scam_detected else "Okay… can you explain more?"
+    intelligence = extract_intelligence(text)
 
-    reply = random.choice(EMOTIONAL_REPLIES)
-    intelligence = {}
-
-    if scam_detected:
-        reply = agent_reply(text)
-        intelligence = extract_intelligence(text)
-
-    # ---------------- SAVE TO MONGO ----------------
+    # ---------- SAVE MONGO ----------
     try:
-        if sessions is not None:
+        if sessions:
             sessions.update_one(
                 {"sessionId": request.sessionId},
-                {
-                    "$push": {
-                        "messages": {
-                            "sender": request.message.sender,
-                            "text": text,
-                            "timestamp": request.message.timestamp
-                        }
-                    }
-                },
+                {"$push": {"messages": {"text": text}}},
                 upsert=True
             )
-    except Exception as e:
-        print("Mongo Save Error:", e)
+    except:
+        pass
 
-    # ---------------- CALLBACK CONDITION ----------------
+    # ---------- CALLBACK ----------
     total_msgs = len(request.conversationHistory)
-
-    if scam_detected and total_msgs >= 6:
-        send_callback(
-            request.sessionId,
-            scam_detected,
-            intelligence,
-            total_msgs
-        )
+    if scam_detected and total_msgs >= 5:
+        send_callback(request.sessionId, scam_detected, intelligence, total_msgs)
 
     return {
         "status": "success",
