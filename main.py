@@ -1,6 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
+from fastapi import FastAPI, Header, HTTPException, Request
 import os
 from dotenv import load_dotenv
 import re
@@ -42,23 +40,26 @@ app = FastAPI()
 def root():
     return {"message": "Honeypot API Running"}
 
-# ---------- MODELS ----------
-class Message(BaseModel):
-    sender: str = "unknown"
-    text: str = ""
-    timestamp: str = ""
+# ---------- EMOTIONAL REPLIES ----------
+EMOTIONAL_REPLIES = [
+    "Oh no… that sounds serious. What should I do now?",
+    "I'm really worried. Can you help me fix this?",
+    "This is scary… is my money safe?",
+    "Please explain, I don’t understand what’s happening.",
+    "Oh gosh, I didn’t expect this today. What should I do?",
+    "I’m nervous now… can you guide me step by step?",
+    "Wait, is this urgent? I’m getting anxious."
+]
 
-class HoneypotRequest(BaseModel):
-    sessionId: str = "default-session"
-    message: Optional[Message] = Message()
-    conversationHistory: Optional[List[Message]] = []
+def emotional_reply():
+    return random.choice(EMOTIONAL_REPLIES)
 
 # ---------- SCAM DETECTION ----------
 def detect_scam(text: str):
     if not text:
         return False
 
-    # AI detection if Groq available
+    # AI detection
     if groq_client:
         try:
             response = groq_client.chat.completions.create(
@@ -70,23 +71,9 @@ def detect_scam(text: str):
         except:
             pass
 
-    # fallback keyword rule
+    # fallback keywords
     keywords = ["urgent", "otp", "verify", "blocked", "bank", "account", "suspend"]
     return any(k in text.lower() for k in keywords)
-
-# ---------- EMOTIONAL REPLIES ----------
-EMOTIONAL_REPLIES = [
-    "Oh no, that sounds serious… what exactly happened?",
-    "I’m really worried now… can you explain more?",
-    "Wait, my account is blocked? What should I do?",
-    "This is scary… please tell me more details.",
-    "I don’t understand… why is this happening?",
-    "Is my money safe? I’m really concerned.",
-    "That sounds urgent… what do I need to do now?"
-]
-
-def emotional_reply():
-    return random.choice(EMOTIONAL_REPLIES)
 
 # ---------- INTELLIGENCE EXTRACTION ----------
 def extract_intelligence(text: str):
@@ -108,7 +95,7 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
         "scamDetected": scam_detected,
         "totalMessagesExchanged": total_msgs,
         "extractedIntelligence": intelligence,
-        "agentNotes": "Scammer used urgency tactics"
+        "agentNotes": "Scammer used urgency and verification tactics"
     }
 
     try:
@@ -117,42 +104,49 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
             json=payload,
             timeout=5
         )
-    except:
-        pass
+        print("Callback Sent")
+    except Exception as e:
+        print("Callback Error:", e)
 
-# ---------- ENDPOINT ----------
+# ---------- MAIN ENDPOINT ----------
 @app.post("/honeypot/message")
-async def honeypot_api(request: Optional[HoneypotRequest] = None,
-                       x_api_key: str = Header(None)):
+async def honeypot_api(request: Request, x_api_key: str = Header(None)):
 
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-    # SAFE DEFAULTS
-    if not request:
-        request = HoneypotRequest()
+    try:
+        body = await request.json()
+    except:
+        body = {}
 
-    text = request.message.text if request.message else ""
+    # Flexible JSON Parsing
+    session_id = body.get("sessionId", "default-session")
+    message = body.get("message", {})
+
+    text = message.get("text", body.get("text", "Hello"))
+    sender = message.get("sender", "scammer")
+    timestamp = message.get("timestamp", "now")
+    history = body.get("conversationHistory", [])
 
     scam_detected = detect_scam(text)
-    reply = emotional_reply() if scam_detected else "Okay… can you explain more?"
+    reply = emotional_reply()
     intelligence = extract_intelligence(text)
 
-    # ---------- SAVE MONGO ----------
+    # ---------- SAVE TO MONGO ----------
     try:
         if sessions:
             sessions.update_one(
-                {"sessionId": request.sessionId},
+                {"sessionId": session_id},
                 {"$push": {"messages": {"text": text}}},
                 upsert=True
             )
     except:
         pass
 
-    # ---------- CALLBACK ----------
-    total_msgs = len(request.conversationHistory)
-    if scam_detected and total_msgs >= 5:
-        send_callback(request.sessionId, scam_detected, intelligence, total_msgs)
+    # ---------- FINAL CALLBACK ----------
+    if scam_detected and len(history) >= 5:
+        send_callback(session_id, scam_detected, intelligence, len(history))
 
     return {
         "status": "success",
