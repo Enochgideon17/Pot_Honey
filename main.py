@@ -1,10 +1,13 @@
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
 import os
 from dotenv import load_dotenv
 from groq import Groq
 import re
 import requests
 from pymongo import MongoClient
+import random
 
 # ---------------- ENV ----------------
 load_dotenv()
@@ -30,6 +33,37 @@ except Exception as e:
 # ---------------- APP ----------------
 app = FastAPI()
 
+# ---------------- MODELS ----------------
+class Message(BaseModel):
+    sender: str
+    text: str
+    timestamp: str
+
+class Metadata(BaseModel):
+    channel: Optional[str] = None
+    language: Optional[str] = None
+    locale: Optional[str] = None
+
+class HoneypotRequest(BaseModel):
+    sessionId: str
+    message: Message
+    conversationHistory: Optional[List[Message]] = []
+    metadata: Optional[Metadata] = None
+
+# ---------------- EMOTIONAL FALLBACKS ----------------
+EMOTIONAL_REPLIES = [
+    "Oh no… what happened to my account?",
+    "That sounds serious, what should I do?",
+    "I’m really worried, is my money safe?",
+    "Can you explain what exactly went wrong?",
+    "Is this from my bank officially?",
+    "What do I need to do now?",
+    "I didn’t understand, can you tell me again?",
+    "Is there any risk to my balance?",
+    "This is scary… what should I do?",
+    "Please help, I don’t want to lose my money."
+]
+
 # ---------------- SCAM DETECTION ----------------
 def detect_scam(text: str):
     try:
@@ -52,8 +86,8 @@ def detect_scam(text: str):
 def agent_reply(text: str):
     try:
         prompt = f"""
-        You are a calm normal human chatting with a scammer.
-        Ask natural clarifying questions. Do not reveal suspicion.
+        You are a worried normal human chatting with a scammer.
+        Respond emotionally but not suspicious.
         Message: {text}
         """
 
@@ -66,7 +100,7 @@ def agent_reply(text: str):
 
     except Exception as e:
         print("Agent Error:", e)
-        return "Could you please explain that a bit more?"
+        return random.choice(EMOTIONAL_REPLIES)
 
 # ---------------- INTELLIGENCE EXTRACTION ----------------
 def extract_intelligence(text: str):
@@ -106,55 +140,34 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
     except Exception as e:
         print("Callback Error:", e)
 
-# ---------------- ROOT ROUTE (IMPORTANT FOR GUVI) ----------------
-@app.get("/")
-async def root():
-    return {"status": "honeypot live"}
-
-# ---------------- FLEXIBLE ENDPOINT ----------------
+# ---------------- API ENDPOINT ----------------
 @app.post("/honeypot/message")
-async def honeypot_api(request: Request, x_api_key: str = Header(None)):
+async def honeypot_api(request: HoneypotRequest, x_api_key: str = Header(None)):
 
-    # ---- API KEY CHECK ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-    # ---- SAFE BODY READ ----
-    try:
-        body = await request.json()
-    except:
-        body = {}
-
-    session_id = body.get("sessionId", "unknown")
-
-    message = body.get("message", {})
-    text = message.get("text", "")
-    sender = message.get("sender", "unknown")
-    timestamp = message.get("timestamp", "now")
-
-    history = body.get("conversationHistory", [])
-
-    # ---- DETECT ----
+    text = request.message.text
     scam_detected = detect_scam(text)
 
-    reply = "Okay, could you explain more?"
+    reply = random.choice(EMOTIONAL_REPLIES)
     intelligence = {}
 
     if scam_detected:
         reply = agent_reply(text)
         intelligence = extract_intelligence(text)
 
-    # ---- SAVE TO MONGO ----
+    # ---------------- SAVE TO MONGO ----------------
     try:
         if sessions is not None:
             sessions.update_one(
-                {"sessionId": session_id},
+                {"sessionId": request.sessionId},
                 {
                     "$push": {
                         "messages": {
-                            "sender": sender,
+                            "sender": request.message.sender,
                             "text": text,
-                            "timestamp": timestamp
+                            "timestamp": request.message.timestamp
                         }
                     }
                 },
@@ -163,9 +176,16 @@ async def honeypot_api(request: Request, x_api_key: str = Header(None)):
     except Exception as e:
         print("Mongo Save Error:", e)
 
-    # ---- CALLBACK ----
-    if scam_detected and len(history) >= 6:
-        send_callback(session_id, scam_detected, intelligence, len(history))
+    # ---------------- CALLBACK CONDITION ----------------
+    total_msgs = len(request.conversationHistory)
+
+    if scam_detected and total_msgs >= 6:
+        send_callback(
+            request.sessionId,
+            scam_detected,
+            intelligence,
+            total_msgs
+        )
 
     return {
         "status": "success",
