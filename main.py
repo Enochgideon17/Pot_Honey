@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException, Body
+from fastapi import FastAPI, Header, HTTPException, Request
 import os
 from dotenv import load_dotenv
 from groq import Groq
@@ -66,7 +66,7 @@ def agent_reply(text: str):
 
     except Exception as e:
         print("Agent Error:", e)
-        return "Could you explain that more?"
+        return "Could you please explain that a bit more?"
 
 # ---------------- INTELLIGENCE EXTRACTION ----------------
 def extract_intelligence(text: str):
@@ -93,7 +93,7 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
         "scamDetected": scam_detected,
         "totalMessagesExchanged": total_msgs,
         "extractedIntelligence": intelligence,
-        "agentNotes": "Scammer used urgency tactics"
+        "agentNotes": "Scammer used urgency and verification tactics"
     }
 
     try:
@@ -106,28 +106,35 @@ def send_callback(session_id, scam_detected, intelligence, total_msgs):
     except Exception as e:
         print("Callback Error:", e)
 
-# ---------------- API ENDPOINT ----------------
+# ---------------- ROOT ROUTE (IMPORTANT FOR GUVI) ----------------
+@app.get("/")
+async def root():
+    return {"status": "honeypot live"}
+
+# ---------------- FLEXIBLE ENDPOINT ----------------
 @app.post("/honeypot/message")
-async def honeypot_api(
-    request: dict = Body(...),
-    x_api_key: str = Header(None)
-):
+async def honeypot_api(request: Request, x_api_key: str = Header(None)):
 
     # ---- API KEY CHECK ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
+    # ---- SAFE BODY READ ----
     try:
-        session_id = request.get("sessionId", "unknown")
-        message = request.get("message", {})
-        text = message.get("text", "")
-        sender = message.get("sender", "unknown")
-        timestamp = message.get("timestamp", "now")
-        history = request.get("conversationHistory", [])
+        body = await request.json()
+    except:
+        body = {}
 
-    except Exception:
-        raise HTTPException(status_code=400, detail="Bad Request Format")
+    session_id = body.get("sessionId", "unknown")
 
+    message = body.get("message", {})
+    text = message.get("text", "")
+    sender = message.get("sender", "unknown")
+    timestamp = message.get("timestamp", "now")
+
+    history = body.get("conversationHistory", [])
+
+    # ---- DETECT ----
     scam_detected = detect_scam(text)
 
     reply = "Okay, could you explain more?"
@@ -165,8 +172,3 @@ async def honeypot_api(
         "scamDetected": scam_detected,
         "reply": reply
     }
-
-# ---------------- ROOT TEST ----------------
-@app.get("/")
-def root():
-    return {"message": "HoneyPot API Running"}
